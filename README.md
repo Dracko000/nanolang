@@ -85,6 +85,14 @@ ops* only pays off once the GEMV gets faster (NEON, NPU). That is exactly why th
 C elementwise path exists and ships enabled — see
 [ROADMAP §7.7](ROADMAP_IMPLEMENTASI.md).
 
+A streaming memory probe on this same box reaches **~16 GB/s**, so a 350 MiB
+container caps decode at **~41–44 tok/s**. At 22–26 tok/s the runtime therefore
+sits at **~51–60 % of that roofline** — it is *not* purely bandwidth-limited. The
+2-bit unpack and the int8 add/sub work in the GEMV are the other candidate, and
+**which of the two ceilings binds is still an open question**. Answering it is the
+prerequisite for deciding whether shrinking the container (see the embedding note
+below) actually buys throughput.
+
 ---
 
 ## The `.nanow` container
