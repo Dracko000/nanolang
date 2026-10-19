@@ -33,7 +33,7 @@ int nano_emit_nanow(const nano_program_t *p, const char *out_path,
 
     nanow_header_t hdr;
     memset(&hdr, 0, sizeof(hdr));
-    hdr.flags        = 0;   /* no optional container features are in use yet */
+    hdr.flags        = 0;   /* model weights: NANOW_FLAG_KV_CACHE stays clear */
     hdr.num_tensors  = (uint32_t)p->n_tensors;
     hdr.num_layers   = p->num_layers;
     hdr.hidden_dim   = p->hidden_dim;

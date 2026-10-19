@@ -8,10 +8,18 @@
 extern "C" {
 #endif
 
-#define NANOW_MAGIC            0x4E414E4F  /* bytes "ONAN" on disk (little-endian) */
+#define NANOW_MAGIC            0x4E414E4F  /* 'N', 'A', 'N', 'O' */
 #define NANOW_VERSION          1
 #define NANOW_PAGE_ALIGNMENT   4096        /* 4KB Page boundary for zero-copy mmap */
 #define NANOW_MAX_NAME_LEN     64
+
+/* Header feature flags (nanow_header_t.flags).
+ *
+ * Model containers leave this at 0. A container whose payload is a KV cache
+ * rather than model weights sets NANOW_FLAG_KV_CACHE, so a reader can refuse to
+ * treat cache state as a model instead of guessing from the file name.
+ * phase1/python/export_to_nanow.py mirrors this value; keep the two in step. */
+#define NANOW_FLAG_KV_CACHE    0x0001
 
 /* Packing formats */
 typedef enum {

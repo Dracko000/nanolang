@@ -347,7 +347,7 @@ model answer: Paris is the capital of France.
 
 ### 7.7 Optimasi Lanjutan: Cache Persisten, Kernel Elementwise C, Router Multi-Langkah
 
-**(A) Cache KV lintas-permintaan (persist ke disk).** Prefill prefix statis agent (preamble tool + few-shot, 445 token) memakan ~42 s dan diulang tiap invocation. Karena cache KV adalah fungsi murni dari id token × bobot, ia aman diserialisasi. `SmolLM2Runner.save_state()/load_state()` menyimpan `pos`, `fed_ids`, `_last_logits`, dan K/V per layer ke `.npz`; kuncinya `sha1(model_tag + id token prefix)`. Prefix dipisah dari task via `build_agent_prompt_parts()`, jadi prefix+few-shot yang sama dipakai ulang oleh tugas apa pun. `--kv-cache-dir DIR` mengaktifkan.
+**(A) Cache KV lintas-permintaan (persist ke disk).** Prefill prefix statis agent (preamble tool + few-shot, 445 token) memakan ~42 s dan diulang tiap invocation. Karena cache KV adalah fungsi murni dari id token × bobot, ia aman diserialisasi. `SmolLM2Runner.save_state()/load_state()` menyimpan `pos`, `fed_ids`, `_last_logits`, dan K/V per layer sebagai container `.nanow` bertanda flag header `NANOW_FLAG_KV_CACHE` (`nanow_state.py`); kuncinya `sha1(model_tag + id token prefix)`. Prefix dipisah dari task via `build_agent_prompt_parts()`, jadi prefix+few-shot yang sama dipakai ulang oleh tugas apa pun. `--kv-cache-dir DIR` mengaktifkan.
 
 | | prefill | waktu dinding |
 | :--- | ---: | ---: |
@@ -422,14 +422,7 @@ Karena itu defaultnya `auto`: **kompak bila constrained** (nama dimasking / arg 
 | prefix full (sebelumnya) | 56,6 s | 13,5 s |
 | prefix kompak | **18,0 s** | **8,0 s** |
 
-### 7.8 Verifikasi
-
-```bash
-python3 -m unittest tests.test_pipeline -v   # 32 tes: ternarisasi, packing, kernel (int8+packed), GEMV fp32, tokenizer, name mapping, retriever online, persistensi KV (A), paritas kernel elementwise C + eksp SIMD rentang lebar + pemilihan op (B/D), gaya prompt (E)
-python3 -m unittest tests.test_tools -v      # 42 tes: parser, sandbox, CRUD, deny-list bash, skema argumen, router + router multi-langkah (C), dedup langkah, loop agent (runner palsu), prompt full/kompak (E)
-python3 phase0/python/test_bitnet.py          # 4 tes matematika BitNet
-python3 phase3/python/test_semantic_dsl.py    # 2 tes semantic DSL
-```
+Pengukuran ulang independen (prefix kompak 173 token, tugas `read_file`, `--planner model`, 2 langkah): **12,36 s → 4,84 s** (2,55×), cache 51.265.536 byte = 51.148.480 byte payload + 117.056 byte overhead (**0,23 %**), dari padding 4 KB per tensor (51 tensor). Overhead tetap kecil karena tensor terbesar (K/V per layer) jauh di atas 4 KB.
 
 **(C) Router multi-langkah** (`route_plan`). `route_task` (7.6) hanya memetakan satu tugas → satu tool. `route_plan` memecah tugas majemuk pada konektor urutan eksplisit (`then`, `and then`, `after that`, `lalu`, `kemudian`, `terus`, `;`) — **tidak** pada "and" telanjang, agar `append X and Y to file` tetap satu call. Bagian lanjutan yang merujuk balik dengan pronomina ("read it") mewarisi path dari langkah sebelumnya. Bagian tanpa tool ("summarize it") dilewati, menjadi tugas model. Planner `route` mengeksekusi seluruh rencana lalu model hanya membahasakan jawaban:
 
@@ -444,8 +437,30 @@ Dua tool tereksekusi berurutan dari satu kalimat; "it" → `todo.txt` diselesaik
 ### 7.8 Verifikasi
 
 ```bash
-python3 -m unittest tests.test_pipeline -v   # 28 tes: ternarisasi, packing, kernel (int8+packed), GEMV fp32, tokenizer, name mapping, retriever online, persistensi KV (A), paritas kernel elementwise C + pemilihan op (B)
-python3 -m unittest tests.test_tools -v      # 39 tes: parser, sandbox, CRUD, deny-list bash, skema argumen, router + router multi-langkah (C), dedup langkah, loop agent (runner palsu), few-shot prompt
+python3 -m unittest tests.test_pipeline -v   # 47 tes: ternarisasi, packing, kernel (int8+packed), GEMV fp32, tokenizer, name mapping, retriever online, container KV `.nanow` (flag header, round-trip, guard tulis/baca, rank descriptor), paritas kernel elementwise C + eksp SIMD rentang lebar + pemilihan op (B/D), gaya prompt (E)
+python3 -m unittest tests.test_tools -v      # 42 tes: parser, sandbox, CRUD, deny-list bash, skema argumen, router + router multi-langkah (C), dedup langkah, loop agent (runner palsu), prompt full/kompak (E)
 python3 phase0/python/test_bitnet.py          # 4 tes matematika BitNet
 python3 phase3/python/test_semantic_dsl.py    # 2 tes semantic DSL
+make -C compiler test                         # 198 assertion (53 kasus) + 19 cek end-to-end (G)
 ```
+
+### 7.9 Bahasa NanoLang: `.nano` → `nanoc` → `.nanow`
+
+**(A) Satu format artefak, satu ekstensi.** Sebelum ini tiga hal ditulis ke disk dengan tiga aturan berbeda: bobot (`.nanow`, writer C), cache KV (`.npz` via `np.savez`), dan tidak ada format sumber sama sekali (graf model hanya ada sebagai kode C/Python). Akibatnya direktori kerja memuat dua format artefak dan loader model tidak dapat membedakan cache dari bobot kecuali dari nama berkas.
+
+Sekarang: **`.nanow` untuk setiap artefak format ini**, ekstensi asli (`*.c`, `*.h`, `*.py`) untuk kode. Sumber `.nano` dikompilasi `nanoc` menjadi `.nanow`. Cache KV menjadi container `.nanow` biasa dengan bit flag header `NANOW_FLAG_KV_CACHE`; `run_smollm2.load_nanow()` menolak memuatnya sebagai model, `nanow_state.read_cache()` menolak memuat model sebagai cache. Tidak ada format ketiga.
+
+| Berkas | Isi |
+| :--- | :--- |
+| `*.nano` | sumber NanoLang |
+| `*.nanow` | container biner — bobot **atau** cache KV, dibedakan flag header |
+| `*.nanoir` | dump teks IR opsional (`--ir-out`) |
+| `*.c` `*.h` `*.py` | kompiler, kernel, runner |
+
+**(B) Flag header, bukan konvensi nama.** `flags` di header 64 byte sebelumnya selalu 0 dan tak bermakna. Kini `NANOW_FLAG_KV_CACHE = 0x0001`. Karena `nanow_write_file()` hanya memaksa `magic`/`version` dan meneruskan `flags` dari pemanggil, writer C dan writer Python (`NanoWExporter`) berbagi kontrak yang sama. Diuji dari kedua arah: uji C menulis container ber-flag lewat `nanow_write_file` lalu membukanya dengan `nanow_model_open` (+9 assertion), uji Python menulis lewat `NanoWExporter` lalu membacanya dengan `nanow_state.read_cache`. Satu assertion lagi ditambahkan ke uji round-trip: container hasil `nanoc` harus ber-`flags` 0.
+
+**(C) Bug `ndims` di exporter Python.** `export_to_nanow.py` menghitung `ndims` sebagai "jumlah dimensi > 1", padahal `nanow_format.h` mendokumentasikan `ndims` sebagai jumlah dimensi (1–4). Untuk tensor dengan dimensi berukuran 1 (mis. `pos` berbentuk `[1]`, atau cache KV satu token) reader akan memotong shape dan me-reshape payload dengan panjang salah. Bug ini laten: 266 tensor model rilis tidak ada yang berdimensi 1, jadi container terkirim tetap valid dan **tidak perlu dikonversi ulang** — diverifikasi: 0 dari 266 descriptor lama yang `ndims`-nya berbeda dari rank sebenarnya. Kini `ndims = data.ndim` dan rank di luar 1–4 ditolak.
+
+**(D) Verifikasi lintas bahasa.** Container KV yang ditulis Python dibaca ulang oleh reader C `nanow_model_open` (dibangun dari `phase1/src/nanow_mmap.c`, bukan dari writer): `flags=0x1`, `k1 ndims=3 shape=[2,5,4]`, `pos=13`, dan tiga nilai float pertama identik bit-per-bit dengan sisi Python. End-to-end: run agent pertama 12,36 s (tulis cache), run kedua 4,84 s (`♻️ loaded KV prefix cache (173 tokens)`) — 2,55×, cache 51,3 MB.
+
+**Batasan yang tetap berlaku.** Flag ini menandai *jenis payload*, bukan versi format; `version` tetap 1 dan tidak ada perubahan layout, sehingga container model yang sudah terbit tetap terbaca. `nanow_state` adalah writer kedua dari layout yang sama, bukan layout kedua — format struct dan exporter diimpor dari `export_to_nanow.py`, dan hasilnya diverifikasi reader C.

@@ -23,6 +23,14 @@
 #include <string.h>
 #include <unistd.h>
 
+/* phase1/src/nanow_writer.c — the one container writer shared by the compiler,
+ * the Python exporter and the cache. Declared here so a test can drive its
+ * header flags directly instead of going through the .nano front end. */
+extern int nanow_write_file(const char *filepath,
+                            const nanow_header_t *hdr_in,
+                            const nanow_tensor_desc_t *descs,
+                            const void **tensor_payloads);
+
 static int g_pass = 0;
 static int g_fail = 0;
 static const char *g_current = "";
@@ -919,6 +927,8 @@ static void codegen_roundtrip_through_the_reader(void) {
 
     CHECK(model.header.magic == NANOW_MAGIC, "magic should be set by the writer");
     CHECK(model.header.version == NANOW_VERSION, "version should be set by the writer");
+    CHECK(model.header.flags == 0, "a compiled model is not a KV cache, got %#x",
+          model.header.flags);
     CHECK(model.header.num_tensors == 3, "the reader should see 3 tensors, got %u",
           model.header.num_tensors);
     CHECK(model.header.num_layers == 2 && model.header.hidden_dim == 8 &&
@@ -975,6 +985,70 @@ static void codegen_roundtrip_through_the_reader(void) {
 
     nanow_model_close(&model);
     nano_program_free(&p);
+}
+
+/*
+ * A KV cache is a .nanow container that is not a model. The distinction lives
+ * in one header bit, so the writer that the runtime actually reads has to carry
+ * it; nanow_write_file() is the only writer shared by the compiler, the Python
+ * exporter and this test.
+ */
+static void codegen_kv_cache_flag_round_trips(void) {
+    float payload[4] = {0.0f, 1.0f, 2.0f, 3.0f};
+
+    nanow_header_t hdr;
+    memset(&hdr, 0, sizeof(hdr));
+    hdr.flags        = NANOW_FLAG_KV_CACHE;
+    hdr.num_tensors  = 1;
+    hdr.num_layers   = 2;
+    hdr.total_params = 4;
+
+    nanow_tensor_desc_t desc;
+    memset(&desc, 0, sizeof(desc));
+    snprintf(desc.name, sizeof(desc.name), "k0");
+    desc.dtype        = NANOW_DTYPE_FP32;
+    desc.packing      = NANOW_PACKING_RAW_INT8;
+    desc.ndims        = 1;
+    desc.shape[0]     = 4;
+    desc.num_elements = 4;
+    desc.data_size    = sizeof(payload);
+
+    const void *payloads[1] = {payload};
+
+    char out[512];
+    tpath("kv.nanow", out, sizeof(out));
+    CHECK(nanow_write_file(out, &hdr, &desc, payloads) == 0,
+          "the writer should accept a KV header");
+
+    nanow_model_t model;
+    CHECK(nanow_model_open(&model, out) == 0, "the reader should open a KV container");
+    if (model.is_open) {
+        CHECK(model.header.flags == NANOW_FLAG_KV_CACHE,
+              "the KV flag should survive the writer, got %#x", model.header.flags);
+        CHECK(model.header.num_layers == 2, "num_layers should survive, got %u",
+              model.header.num_layers);
+        const nanow_tensor_desc_t *d = nanow_model_get_tensor_desc(&model, "k0");
+        CHECK(d != NULL, "k0 should be found by name");
+        if (d) {
+            const float *v = (const float *)nanow_model_get_tensor_data(&model, d);
+            CHECK(v != NULL && v[0] == 0.0f && v[3] == 3.0f,
+                  "the payload should be readable verbatim");
+        }
+        nanow_model_close(&model);
+    }
+
+    /* And a model container must not claim to be a cache. */
+    char model_out[512];
+    tpath("notkv.nanow", model_out, sizeof(model_out));
+    hdr.flags = 0;
+    CHECK(nanow_write_file(model_out, &hdr, &desc, payloads) == 0, "plain write should work");
+    nanow_model_t plain;
+    CHECK(nanow_model_open(&plain, model_out) == 0, "plain container should open");
+    if (plain.is_open) {
+        CHECK(plain.header.flags == 0, "no flag should mean model weights, got %#x",
+              plain.header.flags);
+        nanow_model_close(&plain);
+    }
 }
 
 static void codegen_emit_file_size_is_page_aligned(void) {
@@ -1124,6 +1198,7 @@ int main(void) {
     RUN(sema_explicit_seed_overrides_the_name);
 
     RUN(codegen_roundtrip_through_the_reader);
+    RUN(codegen_kv_cache_flag_round_trips);
     RUN(codegen_emit_file_size_is_page_aligned);
     RUN(codegen_ir_text_file);
     RUN(codegen_ir_text_without_ops_fails);

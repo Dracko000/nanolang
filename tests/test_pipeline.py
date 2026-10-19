@@ -13,6 +13,7 @@ Run:
 from __future__ import annotations
 import importlib.util
 import os
+import struct
 import sys
 import tempfile
 import unittest
@@ -22,6 +23,9 @@ import numpy as np
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO)
 sys.path.insert(0, os.path.join(REPO, "phase1", "python"))
+
+import nanow_state  # noqa: E402
+import export_to_nanow as export  # noqa: E402
 
 
 def _load(name, path):
@@ -264,8 +268,34 @@ class TestWebRetriever(unittest.TestCase):
         self.assertTrue(any("error" in s for s in srcs))
 
 
+def _read_descriptors(path):
+    """Parse a container's header and descriptor table without decoding payloads."""
+    with open(path, "rb") as handle:
+        blob = handle.read()
+    header_size = struct.calcsize(export.HEADER_FMT)
+    header = struct.unpack(export.HEADER_FMT, blob[:header_size])
+    desc_size = struct.calcsize(export.DESC_FMT)
+    descs = []
+    for i in range(header[3]):
+        off = header_size + i * desc_size
+        d = struct.unpack(export.DESC_FMT, blob[off:off + desc_size])
+        descs.append({
+            "name": d[0].split(b"\x00")[0].decode(),
+            "dtype": d[1], "packing": d[2], "ndims": d[3],
+            "shape": tuple(d[4:8]), "num_elements": d[8],
+            "offset": d[9], "size": d[10],
+        })
+    return header, descs
+
+
 class TestKVPersistence(unittest.TestCase):
-    """The cross-request prefix cache must round-trip exactly."""
+    """The cross-request prefix cache must round-trip exactly.
+
+    The cache is a `.nanow` container like everything else this project writes,
+    distinguished by a header flag rather than by its file extension. These
+    tests pin both halves of that contract: the flag is set, and both readers
+    refuse the artifact they are not meant to read.
+    """
 
     def _stub(self, n_layers=2, seq=3, heads=2, hd=4):
         r = object.__new__(run.SmolLM2Runner)
@@ -280,10 +310,18 @@ class TestKVPersistence(unittest.TestCase):
         r._last_logits = np.arange(7, dtype=np.float32)
         return r
 
+    def _model_container(self, path, flags=0):
+        """A minimal but well-formed model container, for negative tests."""
+        exp = export.NanoWExporter(num_layers=1, hidden_dim=4, state_dim=1,
+                                   vocab_size=8, flags=flags)
+        exp.add_tensor("w", np.zeros((2, 4), np.float32), is_ternary=False)
+        exp.export(path)
+        return path
+
     def test_round_trip(self):
         src = self._stub()
         with tempfile.TemporaryDirectory() as tmp:
-            path = os.path.join(tmp, "prefix.npz")
+            path = os.path.join(tmp, "prefix.nanow")
             src.save_state(path)
             dst = object.__new__(run.SmolLM2Runner)
             dst.n_layers = src.n_layers
@@ -295,10 +333,174 @@ class TestKVPersistence(unittest.TestCase):
             np.testing.assert_allclose(got["k"], want["k"])
             np.testing.assert_allclose(got["v"], want["v"])
 
+    def test_round_trip_preserves_shapes(self):
+        src = self._stub(n_layers=3, seq=5, heads=2, hd=4)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "prefix.nanow")
+            src.save_state(path)
+            arrays, meta = nanow_state.read_cache(path)
+        self.assertEqual(meta["num_layers"], 3)
+        for i in range(3):
+            self.assertEqual(arrays[f"k{i}"].shape, (5, 2, 4))
+            self.assertEqual(arrays[f"k{i}"].dtype, np.float32)
+
     def test_missing_file_returns_false(self):
         stub = object.__new__(run.SmolLM2Runner)
         stub.n_layers = 1
-        self.assertFalse(stub.load_state("/nonexistent/nanow-prefix.npz"))
+        self.assertFalse(stub.load_state("/nonexistent/nanow-prefix.nanow"))
+
+    def test_absent_logits_stay_absent(self):
+        src = self._stub()
+        src._last_logits = None
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "prefix.nanow")
+            src.save_state(path)
+            dst = object.__new__(run.SmolLM2Runner)
+            dst.n_layers = src.n_layers
+            self.assertTrue(dst.load_state(path))
+        self.assertIsNone(dst._last_logits)
+
+    def test_cache_container_sets_the_kv_flag(self):
+        src = self._stub()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "prefix.nanow")
+            src.save_state(path)
+            header, descs = _read_descriptors(path)
+        self.assertEqual(header[0], export.NANOW_MAGIC)
+        self.assertEqual(header[1], export.NANOW_VERSION)
+        self.assertEqual(header[2], export.NANOW_FLAG_KV_CACHE)
+        self.assertEqual(header[4], 2)                 # num_layers
+        self.assertEqual(header[3], len(descs))        # num_tensors
+        self.assertEqual({d["name"] for d in descs},
+                         {"pos", "fed_ids", "logits", "k0", "v0", "k1", "v1"})
+        self.assertTrue(all(d["dtype"] == export.DTYPE_FP32 for d in descs))
+
+    def test_model_container_has_no_kv_flag(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._model_container(os.path.join(tmp, "model.nanow"))
+            header, _ = _read_descriptors(path)
+        self.assertEqual(header[2], 0)
+
+    def test_model_container_is_refused_by_the_cache_reader(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._model_container(os.path.join(tmp, "model.nanow"))
+            with self.assertRaises(ValueError) as ctx:
+                nanow_state.read_cache(path)
+        self.assertIn("not a KV cache", str(ctx.exception))
+
+    def test_cache_container_is_refused_by_the_model_loader(self):
+        src = self._stub()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "prefix.nanow")
+            src.save_state(path)
+            with self.assertRaises(ValueError) as ctx:
+                run.load_nanow(path)
+        self.assertIn("KV cache", str(ctx.exception))
+
+    def test_corrupt_cache_is_ignored_not_fatal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "prefix.nanow")
+            with open(path, "wb") as handle:
+                handle.write(b"not a container at all")
+            dst = object.__new__(run.SmolLM2Runner)
+            dst.n_layers = 1
+            # load_state must degrade to "recompute the prefix", never raise.
+            self.assertFalse(dst.load_state(path))
+
+    def test_rewriting_a_cache_replaces_it(self):
+        src = self._stub()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "prefix.nanow")
+            src.save_state(path)
+            first = os.path.getsize(path)
+            src.fed_ids = [1, 5, 9, 11]
+            src.save_state(path)
+            dst = object.__new__(run.SmolLM2Runner)
+            dst.n_layers = src.n_layers
+            self.assertTrue(dst.load_state(path))
+            self.assertEqual(dst.fed_ids, [1, 5, 9, 11])
+        self.assertGreater(first, 0)
+
+
+class TestCacheGuards(unittest.TestCase):
+    """A cache must never be written with values fp32 cannot hold exactly."""
+
+    def test_rounded_ids_are_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "c.nanow")
+            arrays = {"pos": np.array([0], np.float32),
+                      "fed_ids": np.array([2 ** 24], np.float32)}
+            with self.assertRaises(ValueError) as ctx:
+                nanow_state.write_cache(path, arrays, integers=("pos", "fed_ids"))
+            self.assertIn("too large", str(ctx.exception))
+            self.assertFalse(os.path.exists(path))
+
+    def test_fractional_ids_are_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "c.nanow")
+            arrays = {"fed_ids": np.array([1.5], np.float32)}
+            with self.assertRaises(ValueError) as ctx:
+                nanow_state.write_cache(path, arrays, integers=("fed_ids",))
+            self.assertIn("whole numbers", str(ctx.exception))
+
+    def test_non_finite_values_are_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "c.nanow")
+            arrays = {"k0": np.array([np.nan], np.float32)}
+            with self.assertRaises(ValueError) as ctx:
+                nanow_state.write_cache(path, arrays)
+            self.assertIn("non-finite", str(ctx.exception))
+
+    def test_a_rejected_write_leaves_no_file_behind(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "c.nanow")
+            with self.assertRaises(ValueError):
+                nanow_state.write_cache(path, {"k0": np.array([np.inf], np.float32)})
+            self.assertEqual(os.listdir(tmp), [])
+
+
+class TestExporterDescriptorRank(unittest.TestCase):
+    """`ndims` is the true rank, as nanow_format.h documents ("1 to 4").
+
+    It used to be counted as "number of dimensions greater than one", which
+    reports the wrong rank for any tensor with a dimension of size 1; a reader
+    then truncated the shape and reshaped a payload of the wrong length.
+    """
+
+    def test_rank_is_recorded_verbatim(self):
+        cases = [(4,), (1, 4), (1, 1, 4), (2, 3, 5)]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "m.nanow")
+            exp = export.NanoWExporter(num_layers=1, hidden_dim=4)
+            for n, shape in enumerate(cases):
+                exp.add_tensor(f"t{n}", np.zeros(shape, np.float32), is_ternary=False)
+            exp.export(path)
+            _, descs = _read_descriptors(path)
+        for desc, shape in zip(descs, cases):
+            self.assertEqual(desc["ndims"], len(shape), msg=f"shape {shape}")
+            self.assertEqual(desc["shape"][:len(shape)], shape)
+            self.assertEqual(desc["num_elements"], int(np.prod(shape)))
+
+    def test_rank_survives_the_model_loader(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "m.nanow")
+            exp = export.NanoWExporter(num_layers=1, hidden_dim=4)
+            exp.add_tensor("w", np.arange(4, dtype=np.float32).reshape(1, 4),
+                           is_ternary=False)
+            exp.export(path)
+            tensors, _info, mm, fd = run.load_nanow(path)
+            try:
+                self.assertEqual(tensors["w"]["data"].shape, (1, 4))
+            finally:
+                mm.close()
+                os.close(fd)
+
+    def test_rank_outside_one_to_four_is_rejected(self):
+        exp = export.NanoWExporter(num_layers=1, hidden_dim=4)
+        with self.assertRaises(ValueError):
+            exp.add_tensor("scalar", np.zeros((), np.float32), is_ternary=False)
+        with self.assertRaises(ValueError):
+            exp.add_tensor("five", np.zeros((1, 1, 1, 1, 1), np.float32), is_ternary=False)
 
 
 _LIB = os.path.join(REPO, "phase0", "bin", "libternary.so")

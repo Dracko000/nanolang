@@ -14,6 +14,19 @@ NANOW_MAGIC = 0x4E414E4F  # 'N', 'A', 'N', 'O'
 NANOW_VERSION = 1
 PAGE_ALIGNMENT = 4096
 
+# Header feature flags. Model containers leave this at 0; the bit below marks a
+# container whose payload is a KV cache rather than model weights, so a reader
+# can refuse to treat cache state as a model (and vice versa).
+NANOW_FLAG_KV_CACHE = 0x0001
+
+# The on-disk layout, defined once. Both the exporter and the cache reader
+# (nanow_state.py) import these, so a header change cannot leave one behind.
+HEADER_FMT = "<IIII IIII QQ I 3I"   # magic, version, flags, n_tensors, n_layers,
+                                    # hidden, state, vocab, total_params,
+                                    # file_size, directory_size, reserved[3]
+DESC_FMT = "<64s III 4I Q Q Q f"    # name, dtype, packing, ndims, shape[4],
+                                    # num_elements, data_offset, data_size, scale
+
 # Packing enum
 PACKING_RAW_INT8 = 0
 PACKING_2BIT = 1
@@ -71,11 +84,13 @@ class NanoWExporter:
         hidden_dim: int,
         state_dim: int = 16,
         vocab_size: int = 32000,
+        flags: int = 0,
     ):
         self.num_layers = num_layers
         self.hidden_dim = hidden_dim
         self.state_dim = state_dim
         self.vocab_size = vocab_size
+        self.flags = flags
         self.tensors: list[dict] = []
 
     def add_tensor(
@@ -86,6 +101,11 @@ class NanoWExporter:
         scale: float = 1.0,
     ):
         """Adds a tensor to be exported."""
+        if data.ndim < 1 or data.ndim > 4:
+            raise ValueError(
+                f"tensor {name!r} has {data.ndim} dimensions; the container holds 1 to 4"
+            )
+
         if is_ternary:
             packed_payload = pack_ternary_2bit(data)
             packing = PACKING_2BIT
@@ -100,7 +120,11 @@ class NanoWExporter:
                 "name": name.encode("utf-8")[:63],
                 "dtype": dtype,
                 "packing": packing,
-                "shape": list(data.shape) + [1] * (4 - len(data.shape)),
+                # The true rank. This used to be counted as "dims greater than
+                # one", which reports the wrong rank for any tensor that has a
+                # dimension of size 1; readers then dropped that dimension.
+                "ndims": data.ndim,
+                "shape": list(data.shape) + [1] * (4 - data.ndim),
                 "num_elements": data.size,
                 "scale": scale,
                 "payload": packed_payload,
@@ -117,7 +141,7 @@ class NanoWExporter:
         # 2Q: total_params, file_size
         # 1u: header_size
         # 3u: reserved
-        header_fmt = "<IIII IIII QQ I 3I"
+        header_fmt = HEADER_FMT
         header_size = struct.calcsize(header_fmt)
 
         # Tensor desc format:
@@ -128,7 +152,7 @@ class NanoWExporter:
         # 1Q: data_offset
         # 1Q: data_size
         # 1f: scale_factor
-        desc_fmt = "<64s III 4I Q Q Q f"
+        desc_fmt = DESC_FMT
         desc_size = struct.calcsize(desc_fmt)
 
         directory_size = header_size + num_tensors * desc_size
@@ -159,7 +183,7 @@ class NanoWExporter:
             header_fmt,
             NANOW_MAGIC,
             NANOW_VERSION,
-            0,
+            self.flags,
             num_tensors,
             self.num_layers,
             self.hidden_dim,
@@ -183,7 +207,7 @@ class NanoWExporter:
                     pt["name"].ljust(64, b"\x00"),
                     pt["dtype"],
                     pt["packing"],
-                    len([s for s in pt["shape"] if s > 1]),
+                    pt["ndims"],
                     *pt["shape"],
                     pt["num_elements"],
                     pt["offset"],

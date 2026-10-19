@@ -745,7 +745,8 @@ def run_agent(runner, registry: ToolRegistry, task: str, max_steps: int = 3,
     ``kv_cache_dir`` persists the *static* prompt prefix's KV cache to disk so
     a later run with the same tools skips its prefill entirely (the prefix is
     the tool preamble plus few-shot, which is the expensive, task-independent
-    part).
+    part). The cache is a `.nanow` container carrying the KV-cache header flag,
+    so one artifact extension and one reader cover both it and the model.
 
     ``compact`` builds the short prefix variant (see
     :func:`build_agent_prompt_parts`), trading prompt length for a much cheaper
@@ -794,7 +795,7 @@ def run_agent(runner, registry: ToolRegistry, task: str, max_steps: int = 3,
             key = hashlib.sha1(seed.encode()
                                + ",".join(map(str, prefix_ids)).encode()).hexdigest()[:16]
             os.makedirs(kv_cache_dir, exist_ok=True)
-            cache_path = os.path.join(kv_cache_dir, f"prefix_{key}.npz")
+            cache_path = os.path.join(kv_cache_dir, f"prefix_{key}.nanow")
             if runner.load_state(cache_path) and runner.fed_ids == prefix_ids:
                 loaded = True
                 if verbose:

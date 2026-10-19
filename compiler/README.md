@@ -305,7 +305,7 @@ compiler/
   src/nano_driver.c      file -> lex -> parse -> sema
   tools/nanoc.c          command line
   examples/*.nano        tiny_lm, demo_ssm
-  tests/test_nanoc.c     188 assertions over 52 cases
+  tests/test_nanoc.c     198 assertions over 53 cases
   tests/run_examples.sh  end-to-end, incl. the Python reader
   tests/verify_nanow.py  decodes containers with run_smollm2.load_nanow
 ```
@@ -330,7 +330,7 @@ make -C compiler test
 $ make -C compiler test
 ./build/test_nanoc
 nanoc test suite
-188 checks passed, 0 failed
+198 checks passed, 0 failed
 NANOC_BIN=/root/llm/compiler/build/nanoc ./tests/run_examples.sh
 run_examples: /root/llm/compiler/build/nanoc
   ok    demo_ssm: compiled

@@ -23,6 +23,7 @@ import urllib.request
 import urllib.parse
 
 from nanow_tools import ToolRegistry, run_agent
+import nanow_state
 
 # Threading defaults for a small, memory-bound box: keep one OpenMP pool for the
 # C kernels and stop OpenBLAS from spinning up a second, contending pool (the
@@ -37,6 +38,10 @@ import numpy as np
 # ---------------------------------------------------------------------------
 
 NANOW_MAGIC = 0x4E414E4F  # 'NANO'
+
+# Mirrors phase1/include/nanow_format.h. Model containers leave flags at 0; the
+# prefix cache sets this bit so a model loader can tell cache state from weights.
+NANOW_FLAG_KV_CACHE = 0x0001
 
 def load_nanow(path: str) -> dict:
     """Memory-map a .nanow file and return a dict of tensor name → (data, scale, shape, is_ternary)."""
@@ -53,6 +58,14 @@ def load_nanow(path: str) -> dict:
     total_params, total_size, directory_size = header[8:11]
 
     assert magic == NANOW_MAGIC, f"Bad magic: {magic:#x}"
+
+    if flags & NANOW_FLAG_KV_CACHE:
+        mm.close()
+        os.close(fd)
+        raise ValueError(
+            f"{path} is a .nanow KV cache, not a model; "
+            f"read it with nanow_state.read_cache()"
+        )
 
     desc_fmt = "<64s III 4I Q Q Q f"
     desc_size = struct.calcsize(desc_fmt)
@@ -1074,10 +1087,14 @@ class SmolLM2Runner:
         A fixed prompt prefix (the agent's tool preamble + few-shot) costs tens
         of seconds to prefill on this hardware. The cache is a pure function of
         the token ids and the weights, so it is safe to serialize and replay.
+
+        Written as an ordinary ``.nanow`` container carrying the KV-cache header
+        flag, so the project has one artifact format and one reader rather than a
+        `.nanow` plus a stray `.npz`. See ``nanow_state.py``.
         """
         arrays = {
-            "pos": np.array(self.pos, dtype=np.int64),
-            "fed_ids": np.asarray(self.fed_ids, dtype=np.int32),
+            "pos": np.array([self.pos], dtype=np.float32),
+            "fed_ids": np.asarray(self.fed_ids, dtype=np.float32),
         }
         if self._last_logits is not None:
             arrays["logits"] = np.asarray(self._last_logits, dtype=np.float32)
@@ -1085,24 +1102,44 @@ class SmolLM2Runner:
             if cache["k"] is not None:
                 arrays[f"k{i}"] = cache["k"]
                 arrays[f"v{i}"] = cache["v"]
-        np.savez(path, **arrays)
+
+        nanow_state.write_cache(
+            path,
+            arrays,
+            num_layers=self.n_layers,
+            integers=("pos", "fed_ids"),
+        )
 
     def load_state(self, path: str) -> bool:
-        """Restore a cache written by ``save_state``; returns False if absent."""
+        """Restore a cache written by ``save_state``; returns False if unusable.
+
+        The cache is an optimisation, so anything wrong with it means "recompute
+        the prefix", never "fail the run" — but it is reported rather than
+        ignored, because a rejected cache that looks like a hit would silently
+        cost 30 seconds on every run.
+        """
         if not os.path.exists(path):
             return False
-        with np.load(path, allow_pickle=False) as z:
-            pos = int(z["pos"])
-            fed_ids = [int(x) for x in z["fed_ids"]]
-            kv_cache = [{"k": None, "v": None} for _ in range(self.n_layers)]
-            for i in range(self.n_layers):
-                if f"k{i}" in z:
-                    kv_cache[i] = {"k": z[f"k{i}"], "v": z[f"v{i}"]}
-            logits = z["logits"] if "logits" in z else None
+
+        try:
+            arrays, _meta = nanow_state.read_cache(path)
+        except (ValueError, OSError) as exc:
+            print(f"  ⚠️  ignoring unusable KV cache {path}: {exc}", flush=True)
+            return False
+
+        if "pos" not in arrays or "fed_ids" not in arrays:
+            print(f"  ⚠️  ignoring incomplete KV cache {path}", flush=True)
+            return False
+
+        kv_cache = [{"k": None, "v": None} for _ in range(self.n_layers)]
+        for i in range(self.n_layers):
+            if f"k{i}" in arrays:
+                kv_cache[i] = {"k": arrays[f"k{i}"], "v": arrays[f"v{i}"]}
+
         self.kv_cache = kv_cache
-        self.pos = pos
-        self.fed_ids = fed_ids
-        self._last_logits = logits
+        self.pos = int(arrays["pos"][0])
+        self.fed_ids = [int(x) for x in arrays["fed_ids"]]
+        self._last_logits = arrays.get("logits")
         return True
 
 

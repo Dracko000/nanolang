@@ -106,7 +106,7 @@ One file, memory-mapped, self-describing. No pickle, no GPU tensors, no side fil
 
 ```
 ┌──────────────────────────────────────────────┐
-│ header: magic, version, tensor count, config │
+│ header: magic, version, flags, tensor count  │
 ├──────────────────────────────────────────────┤
 │ tensor directory: name, dtype, shape, offset │
 ├──────────────────────────────────────────────┤
@@ -122,6 +122,14 @@ One file, memory-mapped, self-describing. No pickle, no GPU tensors, no side fil
 | Ternary encoding | 2 bits/weight, values `{-1, 0, +1}`, one f32 scale per row |
 | Activation path | dynamic INT8, INT32 accumulation, single rescale per row |
 | Load strategy | `mmap` file → copy into RAM → close the descriptor |
+
+The header `flags` word says what the payload *is*. Model weights leave it at 0;
+a KV cache sets `NANOW_FLAG_KV_CACHE` (`0x0001`). Both readers enforce the
+distinction in both directions — `load_nanow()` refuses a cache, and
+`nanow_state.read_cache()` refuses a model — so a wrong file is a clear error
+rather than a confusing crash further in. Nothing else in the layout changed and
+the format version is still 1, so containers written before the flag existed
+remain readable.
 
 The mmap is closed immediately after load, so the 350 MB file is not held open and
 does not inflate RSS beyond the resident weight copy.
@@ -186,7 +194,7 @@ Real extensions for code, `.nanow` for artefacts of this format.
 | File | What it is |
 | :--- | :--- |
 | `*.nano` | NanoLang source |
-| `*.nanow` | the binary container (weights + directory) |
+| `*.nanow` | the binary container — weights **or** a KV cache, told apart by a header flag |
 | `*.nanoir` | optional IR text dump from `--ir-out` |
 | `*.c` `*.h` `*.py` | the compiler, the kernels, the runner |
 
@@ -200,7 +208,7 @@ rejects: [`compiler/README.md`](compiler/README.md).
 ```bash
 make -C compiler
 compiler/build/nanoc compiler/examples/tiny_lm.nano -o /tmp/tiny_lm.nanow --print-manifest
-make -C compiler test      # 188 assertions + 19 end-to-end checks
+make -C compiler test      # 198 assertions + 19 end-to-end checks
 ```
 
 ---
@@ -215,7 +223,7 @@ make -C compiler test      # 188 assertions + 19 end-to-end checks
 | Tool calling | `--agent` | 10 sandboxed tools, typed schemas, tolerant parser |
 | Constrained decoding | `--constrained-args` | Tool **name** masked at the logit level, **args** forced to schema, values free |
 | KV reuse within a run | *(default)* | Token-level `feed()`; a re-encode never matches because SPM decode re-adds a leading space |
-| KV reuse across runs | `--kv-cache-dir DIR` | Prefix KV persisted to `.npz`, keyed by `sha1(model_tag + prefix ids)` |
+| KV reuse across runs | `--kv-cache-dir DIR` | Prefix KV persisted to a `.nanow` container, keyed by `sha1(model_tag + prefix ids)` |
 | Multi-step planning | `--planner {model,route,hybrid}` | `route` splits on explicit sequencing connectors (*then*, *after that*) — never a bare *and* |
 | Prompt size control | `--prompt-style {auto,full,compact}` | Compact prefix under constrained decoding, full otherwise |
 | Loop protection | *(default)* | Identical `(name, sorted args)` twice → stop and return the first result |
@@ -256,6 +264,17 @@ Then the prefix itself was shrunk. The compact prefix is **172 tokens (−61 %)*
 
 `--prompt-style auto` picks compact exactly when the decoding is constrained,
 which is precisely when it costs nothing in accuracy.
+
+The cache is written to `--kv-cache-dir` as an ordinary `.nanow` container with
+the KV flag set — not a `.npz` and not a second format. Re-measured on the
+current tree (compact prefix, 173 tokens, `--planner model`, 2 steps):
+
+| | cold | warm |
+| :--- | ---: | ---: |
+| `read_file` task | 12.36 s | **4.84 s** (2.55×) |
+
+The 51 MB cache costs 117 KB of 4 KB page padding (0.23 %), because the per-layer
+K/V blocks are far larger than a page.
 
 ---
 
@@ -328,6 +347,7 @@ phase3/   semantic DSL bytecode, renderer, iOS/Android bridges
 tests/    pipeline + tool-runtime unit tests
 run_smollm2.py            the inference runner (tokenizer, attention, decoding, web)
 nanow_tools.py            tool registry, sandbox, router, agent loop
+nanow_state.py            KV prefix cache read/write as a .nanow container
 convert_hf_to_nanow.py    HF checkpoint  -> .nanow
 convert_smollm2.py        SmolLM2        -> .nanow
 WHITEPAPER_NANOLANG.md    architecture spec (aspirational; see the caveat inside)
@@ -346,6 +366,7 @@ or a proposal that is not wired into anything.
 | `.nanow` reader (header, tensor directory, 2-bit unpack) | `phase1/src/nanow_mmap.c`, mirrored in `run_smollm2.py` | **Yes** — the runner parses the real container |
 | Tokenizer, attention, RoPE, sampling, KV cache, web, tools | `run_smollm2.py`, `nanow_tools.py` | **Yes** |
 | `.nanow` writer | `phase1/src/nanow_writer.c` | Yes — used by `convert_hf_to_nanow.py` and by `nanoc` |
+| KV prefix cache as a `.nanow` container | `nanow_state.py` | **Yes** — written by `--kv-cache-dir`, loaded on the next run |
 | `nanoc` compiler, `.nano` language | `compiler/` | **Yes, at build time** — compiles sources to containers; the runner never sees a `.nano` file |
 | `nano-ir` (MLIR-style dialect) | `phase1/src/nano_ir.c` | Yes, at compile time — `nanoc` lowers `op` statements into the graph and runs `nano_ir_validate_graph` on it. Not stored in the container, not read by the runner |
 | Ternary-SSM step | `phase1/src/ssm_step.c` | **No** — the released model is attention-based and has 0 SSM tensors |
@@ -364,17 +385,17 @@ that writes the container.
 
 ```bash
 make -C phase0 lib
-make -C compiler test                        # 188 assertions + 19 end-to-end checks
+make -C compiler test                        # 198 assertions + 19 end-to-end checks
 
-python3 -m unittest tests.test_pipeline -v   # 32 tests
+python3 -m unittest tests.test_pipeline -v   # 47 tests
 python3 -m unittest tests.test_tools -v      # 42 tests
 python3 phase0/python/test_bitnet.py         # BitNet math
 python3 phase3/python/test_semantic_dsl.py   # semantic DSL
 ```
 
 The suite covers ternary quantisation and 2-bit packing, INT8/INT32 GEMV against a
-reference, container round-trip, RoPE, tokenizer name-mapping, KV persistence
-round-trip, C-vs-NumPy parity for every elementwise kernel (including wide-range
+reference, container round-trip, RoPE, tokenizer name-mapping, the KV `.nanow`
+container (header flag, round-trip, both reader guards, descriptor rank), C-vs-NumPy parity for every elementwise kernel (including wide-range
 `exp` values), prompt-style selection, tool-call parsing, path-sandbox escapes,
 the bash deny-list, schema validation, the router, dedup, and the agent loop
 against a fake runner.
