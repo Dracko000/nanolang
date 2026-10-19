@@ -1,0 +1,3 @@
+# Compiler build outputs. Reproducible with `make -C compiler`, so they are
+# never tracked. The root .gitignore already covers *.o and *.nanow.
+build/

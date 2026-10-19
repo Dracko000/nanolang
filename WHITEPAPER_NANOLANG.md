@@ -35,10 +35,11 @@ architecture below. Status as of October 2026:
 | 2 | Ternary weights `{-1, 0, +1}`, 2-bit packed | **Shipped** — a 700M checkpoint runs from a 350 MiB container |
 | 2 | INT8 activation × ternary weight → INT32 accumulate, AVX2 | **Shipped** — measured 22–26 tok/s on 4 CPU cores |
 | 1 | `.nanow` container: header, tensor directory, mmap, writer | **Shipped** — this is the format the released model uses |
+| 1 | `.nano` model-description language and `nanoc` compiler | **Shipped** — `compiler/` compiles source to `.nanow` through the shared phase1 writer; 188 assertions across 52 cases |
 | 1 | Elementwise kernels (RMSNorm, RoPE, SiLU, softmax) in C | **Shipped** — including a float32-accurate AVX2 `exp` |
 | 2 | Ternary **SSM** recurrence replacing attention | **Prototype only** — `phase1/src/ssm_step.c` builds and runs a synthetic demo; the released 700M model is an ordinary attention transformer and contains no SSM tensors |
-| 1 | `nano-ir` MLIR dialect and lowering to ANE/Hexagon | **Prototype only** — `phase1/src/nano_ir.c` is a self-contained data-structure demo; no compiler, no MLIR integration, and nothing in the inference path consumes it |
-| 1 | Bare-metal systems language, zero-GC runtime | **Not started** — there is no language implementation in this repository |
+| 1 | `nano-ir` MLIR dialect and lowering to ANE/Hexagon | **Partly used** — `nanoc` lowers `op` statements into the graph and runs `nano_ir_validate_graph()` on it, so the validator now gates real builds; the graph is a compile-time check and an inspection dump, not stored in the container, and there is still no MLIR integration and no lowering to ANE/Hexagon |
+| 1 | Bare-metal systems language, zero-GC runtime | **Not started as described** — `compiler/` is a compiler for a declarative model-description DSL that emits a data container. It is not the systems language proposed here: no runtime, no garbage collector, no code generation for a target ISA |
 | 1 | QNN / Metal / Hexagon lowering backends | **Source only** — `phase2/` holds a QNN graph builder and a Metal kernel; neither is exercised by any runnable path |
 | 3 | Semantic bytecode DSL and deterministic renderer | **Prototype only** — `phase3/` builds a demo that reports a token-sequence reduction, but the inference runner does not generate or consume semantic primitives |
 

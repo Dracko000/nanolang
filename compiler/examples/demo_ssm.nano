@@ -1,0 +1,98 @@
+// demo_ssm.nano — a state-space model sketch.
+//
+//   nanoc examples/demo_ssm.nano -o demo_ssm.nanow --dump-ir
+//
+// Unlike tiny_lm this one sets a non-zero `state`, so it exercises the
+// nano.ssm_step node. The phase1 IR validator requires an ssm_step node's
+// input dimension to equal the model's hidden dimension; the `hidden = 32`
+// below and the `in = 32` on each ssm_step are checked against each other at
+// compile time, not at run time.
+
+model demo_ssm {
+  layers = 2
+  hidden = 32
+  state  = 8
+  vocab  = 64
+}
+
+tensor embed_tokens {
+  dtype = fp32
+  shape = [64, 32]
+  init  = ramp
+}
+
+for layer in 0..2 {
+  tensor "layers.${layer}.in_proj" {
+    dtype = ternary
+    shape = [32, 32]
+    scale = 0.05
+    init  = ternary
+  }
+
+  tensor "layers.${layer}.out_proj" {
+    dtype = ternary
+    shape = [32, 32]
+    scale = 0.05
+    init  = ternary
+  }
+
+  // Recurrent state transition, stored as fp32 because its scale matters.
+  tensor "layers.${layer}.a_bar" {
+    dtype = fp32
+    shape = [32, 8]
+    init  = ramp
+  }
+
+  tensor "layers.${layer}.gamma" {
+    dtype = fp32
+    shape = [32]
+    init  = ones
+  }
+
+  op rmsnorm        "layers.${layer}.norm_op" {
+    in  = 32
+    out = 32
+  }
+
+  op ternary_linear "layers.${layer}.in_proj_op" {
+    in     = 32
+    out    = 32
+    scale  = 0.05
+    weight = "layers.${layer}.in_proj"
+  }
+
+  op ssm_step       "layers.${layer}.ssm" {
+    in  = 32
+    out = 32
+  }
+
+  op silu_mul       "layers.${layer}.act" {
+    in  = 32
+    out = 32
+  }
+
+  op ternary_linear "layers.${layer}.out_proj_op" {
+    in     = 32
+    out    = 32
+    scale  = 0.05
+    weight = "layers.${layer}.out_proj"
+  }
+
+  op residual_add   "layers.${layer}.residual" {
+    in  = 32
+    out = 32
+  }
+}
+
+tensor final_norm {
+  dtype = fp32
+  shape = [32]
+  init  = ones
+}
+
+op embedding_lookup "embed" {
+  in  = 64
+  out = 32
+}
+
+emit "demo_ssm.nanow"

@@ -1,0 +1,113 @@
+// tiny_lm.nano — a small transformer-shaped model description.
+//
+//   nanoc examples/tiny_lm.nano -o tiny_lm.nanow --print-manifest
+//
+// Every tensor is generated deterministically from its own name, so the
+// container is byte-for-byte reproducible on any machine. It is small enough
+// to inspect by hand, and the phase1 reader and run_smollm2.py both load it
+// without modification.
+
+model tiny_lm {
+  layers = 2
+  hidden = 64
+  vocab  = 128
+}
+
+// Token embedding. A ramp means row i differs from row j by construction, so a
+// transposed or mis-indexed lookup shows up immediately.
+tensor embed_tokens {
+  dtype = fp32
+  shape = [128, 64]
+  init  = ramp
+}
+
+for layer in 0..2 {
+  // The same three tensor declarations, unrolled with ${layer} in the name.
+  // No `seed` is given: init = ternary derives its generator from the tensor
+  // name, so layers.0.w_in and layers.1.w_in differ automatically.
+
+  tensor "layers.${layer}.w_in" {
+    dtype = ternary
+    shape = [64, 64]
+    scale = 0.02
+    init  = ternary
+  }
+
+  tensor "layers.${layer}.w_out" {
+    dtype = ternary
+    shape = [64, 64]
+    scale = 0.02
+    init  = ternary
+  }
+
+  tensor "layers.${layer}.norm" {
+    dtype = fp32
+    shape = [64]
+    init  = ones
+  }
+
+  // The graph. ternary_linear must name its weight tensor, which is how the
+  // compiler proves the op and the data agree before writing anything.
+  op rmsnorm        "layers.${layer}.norm_op" {
+    in  = 64
+    out = 64
+  }
+
+  op ternary_linear "layers.${layer}.in_proj" {
+    in     = 64
+    out    = 64
+    scale  = 0.02
+    weight = "layers.${layer}.w_in"
+  }
+
+  op silu_mul       "layers.${layer}.act" {
+    in  = 64
+    out = 64
+  }
+
+  op ternary_linear "layers.${layer}.out_proj" {
+    in     = 64
+    out    = 64
+    scale  = 0.02
+    weight = "layers.${layer}.w_out"
+  }
+
+  op residual_add   "layers.${layer}.residual" {
+    in  = 64
+    out = 64
+  }
+}
+
+tensor final_norm {
+  dtype = fp32
+  shape = [64]
+  init  = ones
+}
+
+// Output projection. Weights are [out, in], i.e. [vocab, hidden].
+tensor lm_head {
+  dtype = ternary
+  shape = [128, 64]
+  scale = 0.02
+  init  = ternary
+  seed  = 99
+}
+
+op embedding_lookup "embed" {
+  in  = 128
+  out = 64
+}
+
+op rmsnorm          "final_norm_op" {
+  in  = 64
+  out = 64
+}
+
+op ternary_linear   "lm_head_op" {
+  in     = 64
+  out    = 128
+  scale  = 0.02
+  weight = "lm_head"
+}
+
+emit "tiny_lm.nanow"
