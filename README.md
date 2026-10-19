@@ -215,12 +215,22 @@ python3 run_smollm2.py --model models/bitnet700m/bitnet700m.nanow \
   --agent --constrained-args --planner route \
   --workspace ./nanow_workspace --allow-bash \
   --kv-cache-dir ./.kv \
-  --task "create todo.txt with the content buy milk then read it" \
+  --prompt "create todo.txt with the content buy milk then read it" \
   --max-steps 3
+```
+
+```
+  🧭 router -> write_file({"path": "todo.txt", "content": "buy milk"}) -> 'wrote 8 bytes to todo.txt'
+  🧭 router -> read_file({"path": "todo.txt"}) -> 'buy milk'
 ```
 
 The router turns that sentence into `write_file(todo.txt, "buy milk")` followed by
 `read_file(todo.txt)` — the pronoun *it* inherits the path from the previous step.
+
+> **Honest caveat:** the *tool calls* are correct; the *prose summary* the model
+> writes at the end is not. A 700M base model has no instruction tuning, so its
+> closing sentence frequently drifts (a real run ended with `I'm trying to do this
+> in C++:`). Trust the tool transcript, not the narration.
 
 ---
 
@@ -265,6 +275,9 @@ against a fake runner.
 - **The model, not the runtime, limits quality.** 700M parameters produce a
   700M-parameter-quality answer. The runtime makes it *fast and grounded*, not
   *smart*.
+- **Constrained tool calls are reliable; the prose around them is not.** The call
+  the model makes is correct, but the natural-language summary it generates
+  afterwards frequently drifts. Read the tool transcript, not the narration.
 - **Elementwise C kernels buy ~5 % end-to-end today.** They are 1.9×–2.6× faster
   per op ([best-of-6 decode](ROADMAP_IMPLEMENTASI.md): 43.74 → 37.95 ms/token,
   1.15×), but the GEMV is 95 % of the time. Adopted because they are correct,
