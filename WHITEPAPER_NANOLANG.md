@@ -24,6 +24,30 @@ Together, this stack theoretically delivers up to **10–15× reduction in DRAM 
 
 ---
 
+### Implementation Status
+
+This document is a design proposal. Not all of it is built, and it is worth being
+explicit about which parts are, because the shipped system is narrower than the
+architecture below. Status as of October 2026:
+
+| Layer | Component | Status |
+| :--- | :--- | :--- |
+| 2 | Ternary weights `{-1, 0, +1}`, 2-bit packed | **Shipped** — a 700M checkpoint runs from a 350 MiB container |
+| 2 | INT8 activation × ternary weight → INT32 accumulate, AVX2 | **Shipped** — measured 22–26 tok/s on 4 CPU cores |
+| 1 | `.nanow` container: header, tensor directory, mmap, writer | **Shipped** — this is the format the released model uses |
+| 1 | Elementwise kernels (RMSNorm, RoPE, SiLU, softmax) in C | **Shipped** — including a float32-accurate AVX2 `exp` |
+| 2 | Ternary **SSM** recurrence replacing attention | **Prototype only** — `phase1/src/ssm_step.c` builds and runs a synthetic demo; the released 700M model is an ordinary attention transformer and contains no SSM tensors |
+| 1 | `nano-ir` MLIR dialect and lowering to ANE/Hexagon | **Prototype only** — `phase1/src/nano_ir.c` is a self-contained data-structure demo; no compiler, no MLIR integration, and nothing in the inference path consumes it |
+| 1 | Bare-metal systems language, zero-GC runtime | **Not started** — there is no language implementation in this repository |
+| 1 | QNN / Metal / Hexagon lowering backends | **Source only** — `phase2/` holds a QNN graph builder and a Metal kernel; neither is exercised by any runnable path |
+| 3 | Semantic bytecode DSL and deterministic renderer | **Prototype only** — `phase3/` builds a demo that reports a token-sequence reduction, but the inference runner does not generate or consume semantic primitives |
+
+The projections in Section 5 are analytical estimates for the full three-layer
+stack on fixtures that do not all exist. The measured numbers for what *is* built
+are in [ROADMAP_IMPLEMENTASI.md](ROADMAP_IMPLEMENTASI.md) and the repository README.
+
+---
+
 ```
 +-------------------------------------------------------------------------+
 |                        LAYER 3: SEMANTIC DSL                            |

@@ -250,6 +250,29 @@ WHITEPAPER_NANOLANG.md    architecture spec (aspirational; see the caveat inside
 ROADMAP_IMPLEMENTASI.md   engineering log with every measured finding
 ```
 
+### What actually runs
+
+The directories above are **not all on the same footing**. The released model
+exercises `phase0` and the Python runner; the rest is either a buildable side demo
+or a proposal that is not wired into anything.
+
+| Component | Where | Used by the released model? |
+| :--- | :--- | :--- |
+| Ternary GEMV + elementwise C kernels | `phase0` | **Yes** — loaded through ctypes as `libternary.so` |
+| `.nanow` reader (header, tensor directory, 2-bit unpack) | `phase1/src/nanow_mmap.c`, mirrored in `run_smollm2.py` | **Yes** — the runner parses the real container |
+| Tokenizer, attention, RoPE, sampling, KV cache, web, tools | `run_smollm2.py`, `nanow_tools.py` | **Yes** |
+| `.nanow` writer | `phase1/src/nanow_writer.c` | Yes, but only at conversion time (`convert_hf_to_nanow.py`) |
+| `nano-ir` (MLIR-style dialect) | `phase1/src/nano_ir.c` | **No** — standalone demo; nothing imports it |
+| Ternary-SSM step | `phase1/src/ssm_step.c` | **No** — the released model is attention-based and has 0 SSM tensors |
+| Engine CLI, QNN and Metal backends, SSM distillation | `phase2` | **No** — builds and runs as its own benchmark |
+| Semantic DSL bytecode, renderer, iOS/Android bridges | `phase3` | **No** — builds and runs as its own demo |
+
+Put plainly: **the `.nanow` container format is real and in production. "NanoLang"
+as an IR, a compiler, or a semantic-bytecode language is not part of the inference
+path.** The whitepaper describes three layers; what you actually get when you run
+the quickstart is the container from Layer 1 and the ternary arithmetic of Layer 2.
+The whitepaper carries an implementation-status table for the same reason.
+
 ### Tests
 
 ```bash
