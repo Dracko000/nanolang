@@ -196,6 +196,7 @@ Real extensions for code, `.nanow` for artefacts of this format.
 | `*.nano` | NanoLang source |
 | `*.nanow` | the binary container — weights **or** a KV cache, told apart by a header flag |
 | `*.nanoir` | optional IR text dump from `--ir-out` |
+| `*.bin` | raw payload read by `init = from`; an input, not an artefact |
 | `*.c` `*.h` `*.py` | the compiler, the kernels, the runner |
 
 The C sources stay `.c`/`.h` deliberately. `gcc -c x.nanow` silently produces no

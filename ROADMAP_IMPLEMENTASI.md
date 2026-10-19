@@ -455,6 +455,7 @@ Sekarang: **`.nanow` untuk setiap artefak format ini**, ekstensi asli (`*.c`, `*
 | `*.nano` | sumber NanoLang |
 | `*.nanow` | container biner — bobot **atau** cache KV, dibedakan flag header |
 | `*.nanoir` | dump teks IR opsional (`--ir-out`) |
+| `*.bin` | payload mentah untuk `init = from`; masukan, bukan artefak |
 | `*.c` `*.h` `*.py` | kompiler, kernel, runner |
 
 **(B) Flag header, bukan konvensi nama.** `flags` di header 64 byte sebelumnya selalu 0 dan tak bermakna. Kini `NANOW_FLAG_KV_CACHE = 0x0001`. Karena `nanow_write_file()` hanya memaksa `magic`/`version` dan meneruskan `flags` dari pemanggil, writer C dan writer Python (`NanoWExporter`) berbagi kontrak yang sama. Diuji dari kedua arah: uji C menulis container ber-flag lewat `nanow_write_file` lalu membukanya dengan `nanow_model_open` (+9 assertion), uji Python menulis lewat `NanoWExporter` lalu membacanya dengan `nanow_state.read_cache`. Satu assertion lagi ditambahkan ke uji round-trip: container hasil `nanoc` harus ber-`flags` 0.

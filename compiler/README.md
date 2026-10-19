@@ -132,7 +132,7 @@ Declares one tensor: its descriptor and its payload.
 | `packing` | ident   | no                  | `2bit` (default for ternary), `radix3`, `raw` |
 | `scale`   | number  | for ternary         | Dequantisation scale; must be > 0             |
 | `seed`    | int     | no                  | Only with `init = ternary`                     |
-| `source`  | string  | with `init = from`  | Path to a raw payload                         |
+| `source`  | string  | with `init = from`  | Path to a raw payload (see below)               |
 
 A tensor name is stored in 64 bytes, so it must be at most 63 characters; the
 compiler rejects longer names rather than truncating them.
@@ -161,6 +161,12 @@ LCG — reproducible, not cryptographic.
 `init = from` reads exactly the expected number of bytes. A file that is too
 short or too long is an error, because a silently truncated weight matrix corrupts
 results far from the cause.
+
+The file is raw little-endian data, conventionally `*.bin`, and *not* a `.nanow`
+container. It is an input to the compiler, not an artefact of this format: bytes
+handed to the compiler are by definition not yet in the format the compiler
+produces. Reading a tensor back out of a container would need a different field
+and is not supported.
 
 ### `op`
 
