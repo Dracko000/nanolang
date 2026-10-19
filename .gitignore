@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# C build artifacts
+*.o
+*.so
+phase*/bin/
+
+# Models and generated containers: reproducible from convert_hf_to_nanow.py,
+# never tracked.
+models/
+*.nanow
+*.safetensors
+*.pt
+*.pth
+*.onnx
+*.h5
+
+# Agent runtime scratch state
+nanow_workspace/
+.kv/
+
+# Editors / OS
+.DS_Store
+*.swp
+.idea/
+.vscode/
