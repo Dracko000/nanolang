@@ -8,7 +8,7 @@
 extern "C" {
 #endif
 
-#define NANOW_MAGIC            0x4E414E4F  /* 'N', 'A', 'N', 'O' */
+#define NANOW_MAGIC            0x4E414E4F  /* bytes "ONAN" on disk (little-endian) */
 #define NANOW_VERSION          1
 #define NANOW_PAGE_ALIGNMENT   4096        /* 4KB Page boundary for zero-copy mmap */
 #define NANOW_MAX_NAME_LEN     64
