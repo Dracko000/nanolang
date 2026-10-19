@@ -34,13 +34,13 @@ void test_prompt(nanolang_handle_t handle, const char *prompt, int lang_id, int 
     printf("    Deterministic Render Time:    %.2f microseconds (0 FLOPs Neural!)\n", latency_us);
 }
 
-int main(void) {
+int main(int argc, char **argv) {
     printf("======================================================================\n");
     printf(" NANOLANG PHASE 3: SEMANTIC AST DSL & MOBILE SDK BENCHMARK\n");
     printf(" Gate 3 Validation: 60-75%% Token Reduction & Sub-Watt Energy Efficiency\n");
     printf("======================================================================\n");
 
-    const char *model_path = "/root/llm/phase1/model_sample.nanow";
+    const char *model_path = (argc > 1) ? argv[1] : "../phase1/model_sample.nanow";
     printf("Initializing NanoLang Mobile Engine from: %s\n", model_path);
 
     nanolang_handle_t handle = nanolang_mobile_init(model_path);

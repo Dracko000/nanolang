@@ -26,7 +26,7 @@ int main(void) {
     printf(" Gate 1 Validation: Sub-150ms Model Loading & Constant O(1) Memory\n");
     printf("======================================================================\n");
 
-    const char *test_model_path = "/root/llm/phase1/model_sample.nanow";
+    const char *test_model_path = "model_sample.nanow";
     const int num_layers = 16;
     const int hidden_dim = 2048;
     const int state_dim = 16;

@@ -11,7 +11,7 @@ static double get_time_sec(void) {
 }
 
 int main(int argc, char **argv) {
-    const char *model_path = (argc > 1) ? argv[1] : "/root/llm/phase1/model_sample.nanow";
+    const char *model_path = (argc > 1) ? argv[1] : "../phase1/model_sample.nanow";
 
     printf("======================================================================\n");
     printf(" NANOLANG PHASE 2: AUTOREGRESSIVE INFERENCE ENGINE BENCHMARK\n");

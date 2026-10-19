@@ -82,7 +82,8 @@ if __name__ == "__main__":
     exporter.add_tensor("layers.0.ssm_in_proj", W_distilled, is_ternary=True, scale=gamma_distilled)
     exporter.add_tensor("layers.1.ssm_in_proj", W_distilled, is_ternary=True, scale=gamma_distilled)
 
-    distilled_path = "/root/llm/phase2/distilled_model.nanow"
+    distilled_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                  "distilled_model.nanow")
     exporter.export(distilled_path)
     print(f"\nDistilled model successfully exported to: {distilled_path}")
     print("=" * 70)

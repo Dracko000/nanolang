@@ -242,7 +242,8 @@ if __name__ == "__main__":
     W = np.random.choice([-1, 0, 1], size=(512, 512)).astype(np.int8)
     exporter.add_tensor("layer0.ssm_in", W, is_ternary=True, scale=0.02)
 
-    sample_file = "/root/llm/phase1/python_export.nanow"
+    sample_file = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               "python_export.nanow")
     exporter.export(sample_file)
     print("Exported successfully.")
     inspect_nanow(sample_file)

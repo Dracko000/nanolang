@@ -21,6 +21,6 @@ run: $(TEST_BIN)
 	./$(TEST_BIN)
 
 clean:
-	rm -rf bin $(OBJS) /root/llm/phase1/model_sample.nanow
+	rm -rf bin $(OBJS) model_sample.nanow python_export.nanow
 
 .PHONY: all run clean

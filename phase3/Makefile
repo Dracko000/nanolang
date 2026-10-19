@@ -1,5 +1,6 @@
 CC ?= gcc
-CFLAGS ?= -O3 -mavx2 -mfma -Wall -Wextra -fPIC \
+# -fopenmp: the phase0 objects linked in here need the OpenMP runtime.
+CFLAGS ?= -O3 -mavx2 -mfma -fopenmp -Wall -Wextra -fPIC \
           -Iinclude -I../phase2/include -I../phase1/include -I../phase0/include
 
 P0_OBJS = ../phase0/src/ternary_ref.o ../phase0/src/ternary_avx2.o
@@ -23,7 +24,7 @@ bin:
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(LIB_SO): $(ALL_OBJS)
-	$(CC) -shared $(ALL_OBJS) -o $(LIB_SO) -lm
+	$(CC) -shared $(ALL_OBJS) -o $(LIB_SO) -lm -fopenmp
 
 $(DEMO_BIN): $(ALL_OBJS) $(DEMO_SRC)
 	$(CC) $(CFLAGS) $(ALL_OBJS) $(DEMO_SRC) -o $(DEMO_BIN) -lm
