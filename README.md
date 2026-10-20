@@ -77,26 +77,42 @@ GEMV, OpenMP across the 4 cores, and folding batch dims away.
 
 Each token performs, per layer: **4 RMSNorm** (input, `inner_attn_ln`,
 post-attention, `ffn_layernorm`), **2 RoPE**, **1 SiLU-mul**, **1 softmax** —
-**193 elementwise ops per token** across 24 layers. Everything else is the
-ternary GEMV, which scales `O(hidden²)` and dominates:
+**193 elementwise ops per token** across 24 layers. The rest is GEMV. Measured
+by wrapping the runner's own methods (`python3 bench_roofline.py --tokens 16`):
 
-| | ms/token | share |
-| :--- | ---: | ---: |
-| Ternary GEMV + attention | ~36 | ~95% |
-| Elementwise (C kernels) | ~2.1 | ~5% |
+| Stage | ms/token | MB/token | GB/s | share |
+| :--- | ---: | ---: | ---: | ---: |
+| Ternary GEMV (168 calls) | 17.65 | 169.9 | 9.6 | 53.2 % |
+| fp32 GEMV — tied embed as LM head | 7.25 | 196.6 | 27.1 | 21.9 % |
+| RMSNorm | 1.73 | 1.7 | — | 5.2 % |
+| RoPE | 0.57 | — | — | 1.7 % |
+| SiLU·up | 0.50 | 0.8 | — | 1.5 % |
+| Softmax | 0.31 | — | — | 0.9 % |
+| Attention matmuls + Python | 5.13 | — | — | 15.5 % |
+| **Total** | **33.15** | | | 30.2 tok/s |
 
-Because the linear layers are ~95% of the time, kernel work on the *elementwise
-ops* only pays off once the GEMV gets faster (NEON, NPU). That is exactly why the
-C elementwise path exists and ships enabled — see
-[ROADMAP §7.7](ROADMAP_IMPLEMENTASI.md).
+The two GEMVs are limited by **different** things, and that decides what is worth
+optimising:
 
-A streaming memory probe on this same box reaches **~16 GB/s**, so a 350 MiB
-container caps decode at **~41–44 tok/s**. At 22–26 tok/s the runtime therefore
-sits at **~51–60 % of that roofline** — it is *not* purely bandwidth-limited. The
-2-bit unpack and the int8 add/sub work in the GEMV are the other candidate, and
-**which of the two ceilings binds is still an open question**. Answering it is the
-prerequisite for deciding whether shrinking the container (see the embedding note
-below) actually buys throughput.
+- **fp32 head is bandwidth-bound.** It reaches 27.1 GB/s against a measured
+  streaming ceiling of 17.8–29.2 GB/s, and the isolated probe shows it is 2.9–4.7×
+  faster with its weights in cache. Bytes are the lever.
+- **Ternary GEMV is compute-bound.** It reaches 9.6 GB/s, far under the ceiling,
+  and the probe shows it only gets 1.35× faster when its weights are in cache —
+  its ALU path (≈22 ns/row) already takes longer than DRAM would need to deliver
+  the row (≈16 ns). Removing memory entirely would save ~25 %, no more.
+
+So shrinking the ternary payload (denser packing) buys nothing, while shrinking
+the fp32 embedding would. `phase0/bench/stream_probe.c` (`make -C phase0 probe`)
+is the experiment behind both statements; the numbers and the method are in
+[ROADMAP §7.10](ROADMAP_IMPLEMENTASI.md).
+
+Two caveats, stated because they matter: the box used for these numbers is
+shared (load average ≈1.7 during the run), so absolute throughput is a floor, not
+a potential — repeat runs of the table above landed at 33.2–36.2 ms/token, i.e.
+28.4–30.2 tok/s. And the per-shape breakdown shows the kernel's *minimum* cost
+(22–28 ns/row) matches the isolated probe while its *mean* is 1.5–1.7× worse —
+i.e. part of what looks like kernel cost is scheduling noise.
 
 ---
 
@@ -349,6 +365,8 @@ tests/    pipeline + tool-runtime unit tests
 run_smollm2.py            the inference runner (tokenizer, attention, decoding, web)
 nanow_tools.py            tool registry, sandbox, router, agent loop
 nanow_state.py            KV prefix cache read/write as a .nanow container
+bench_roofline.py         per-stage profile of a decoded token (ms, MB, GB/s per stage)
+phase0/bench/stream_probe.c  read floor vs GEMV, warm vs DRAM: bandwidth or compute?
 convert_hf_to_nanow.py    HF checkpoint  -> .nanow
 convert_smollm2.py        SmolLM2        -> .nanow
 WHITEPAPER_NANOLANG.md    architecture spec (aspirational; see the caveat inside)

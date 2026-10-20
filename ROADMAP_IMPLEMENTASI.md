@@ -465,3 +465,68 @@ Sekarang: **`.nanow` untuk setiap artefak format ini**, ekstensi asli (`*.c`, `*
 **(D) Verifikasi lintas bahasa.** Container KV yang ditulis Python dibaca ulang oleh reader C `nanow_model_open` (dibangun dari `phase1/src/nanow_mmap.c`, bukan dari writer): `flags=0x1`, `k1 ndims=3 shape=[2,5,4]`, `pos=13`, dan tiga nilai float pertama identik bit-per-bit dengan sisi Python. End-to-end: run agent pertama 12,36 s (tulis cache), run kedua 4,84 s (`♻️ loaded KV prefix cache (173 tokens)`) — 2,55×, cache 51,3 MB.
 
 **Batasan yang tetap berlaku.** Flag ini menandai *jenis payload*, bukan versi format; `version` tetap 1 dan tidak ada perubahan layout, sehingga container model yang sudah terbit tetap terbaca. `nanow_state` adalah writer kedua dari layout yang sama, bukan layout kedua — format struct dan exporter diimpor dari `export_to_nanow.py`, dan hasilnya diverifikasi reader C.
+
+### 7.10 T1: GEMV Ternary — Bandwidth atau Compute?
+
+**(A) Kenapa timing GEMV saja tidak menjawab.** GEMV membaca tiap byte bobot tepat sekali, jadi waktunya dibatasi dari bawah oleh `byte / bandwidth` dan dari atas oleh `kerja / compute`. Keduanya menghasilkan satu angka yang sama, sehingga mengukur GEMV saja tidak bisa menyebut mana yang mengikat. Yang bisa memisahkan keduanya adalah **biaya marginal satu baris** diukur dua kali: sekali saat bobotnya sudah di cache (memori gratis → yang tersisa hanya batas ALU), sekali saat bobotnya jauh melewati L3 (tiap baris harus datang dari DRAM).
+
+Alatnya `phase0/bench/stream_probe.c` (`make -C phase0 probe`) dan `bench_roofline.py`. Keduanya memanggil kernel yang benar-benar dipakai runner, bukan reimplementasi.
+
+**(B) Hasil probe** (K=1536, 3 thread, regresi linear atas 5–8 ukuran M, R² ≥ 0,998):
+
+| Kernel | baris | warm (cache) | cold (DRAM) | biaya antar DRAM saja |
+| :--- | ---: | ---: | ---: | ---: |
+| ternary 2-bit | 384 B | 19,8–22,0 ns | 26,6–29,4 ns | ~16 ns |
+| fp32 (embed/head) | 6144 B | 95–100 ns | 291–467 ns | ~259 ns |
+
+Plafon streaming (baca paralel 256 MB) terukur **17,8–29,2 GB/s** antar-run.
+
+Bacaan: kernel ternary **hanya 1,3–1,35× lebih cepat saat memorinya gratis**, dan biaya warm-nya (≈20–22 ns) sudah *melewati* biaya antar DRAM yang dihitung dari plafon streaming (13–16 ns/baris). Artinya ALU lebih lambat daripada DRAM — menghapus memori sepenuhnya pun hanya menghemat ~25 %. Sebaliknya fp32 **2,9–4,7× lebih cepat saat warm**, jadi hampir seluruh waktunya adalah menunggu byte (biaya antar DRAM ≈ 210–345 ns/baris, sebanding dengan cold 291–467 ns).
+
+Rasio warm/cold inilah bukti utamanya, karena tidak bergantung pada plafon streaming yang paling berisik antar-run (17,8–29,2 GB/s) di kotak yang dipakai bersama ini. Perbandingan dengan biaya antar DRAM hanya pendukung.
+
+**(C) Hasil in-situ** (`python3 bench_roofline.py --tokens 16`, 33,15 ms/token = 30,2 tok/s; run lain di kotak yang lebih sibuk 35,20 ms/token = 28,4 tok/s):
+
+| Tahap | ms/token | MB/token | GB/s | porsi |
+| :--- | ---: | ---: | ---: | ---: |
+| ternary GEMV | 17,65 | 169,9 | **9,63** | 53,2 % |
+| fp32 GEMV (lm head) | 7,25 | 196,6 | **27,11** | 21,9 % |
+| rmsnorm | 1,73 | 1,7 | — | 5,2 % |
+| rope | 0,57 | — | — | 1,7 % |
+| silu·up | 0,50 | 0,8 | — | 1,5 % |
+| softmax | 0,31 | — | — | 0,9 % |
+| attention + overhead | 5,13 | — | — | 15,5 % |
+
+Angka in-situ mengonfirmasi probe dari sisi lain: ternary mencapai 9,63 GB/s dari plafon 17,8–29,2 GB/s (jauh di bawah → compute-bound), sedangkan lm head mencapai 27,11 GB/s yang **persis di plafon** (→ bandwidth-bound).
+
+Rincian per bentuk (ns/baris, dinormalkan ke K=1536):
+
+| M × K | call/token | rata-rata | minimum |
+| :--- | ---: | ---: | ---: |
+| 1536 × 1536 | 96 | 47,5 | 27,7 |
+| 4096 × 1536 | 48 | 36,9 | 22,2 |
+| 1536 × 4096 | 24 | 34,4 | 22,3 |
+
+Nilai **minimum** (22,2–27,7) menyamai probe warm (22,0): kernelnya sendiri secepat hasil pengukuran terisolasi. Nilai rata-rata 1,5–1,7× lebih buruk karena kotak ini dipakai bersama (load average ~1,7 saat pengukuran), jadi angka absolut di atas adalah **batas bawah**, bukan potensi.
+
+**(D) Biaya tetap per panggilan.** Intersep regresi pada K=1536 adalah 9,5 µs. Diuji dengan memvariasikan K (M=256..1024, warm):
+
+| K | biaya tetap | ns/baris |
+| ---: | ---: | ---: |
+| 384 | 4,64 µs | 6,0 |
+| 768 | 4,76 µs | 12,4 |
+| 1536 | 9,46 µs | 19,3 |
+| 3072 | 12,13 µs | 41,2 |
+| 6144 | 25,19 µs | 79,0 |
+
+Intersepnya **naik mengikuti K**, jadi penyebabnya bukan sekadar start thread-team: ada ~3,3 µs konstan + ~3,6 ns per elemen K, yaitu kuantisasi vektor X dan pembangunan 4 plane yang masih skalar. Dengan 168 panggilan per token, ini sekitar **1,7–2 ms/token (≈10 % waktu GEMV ternary)**.
+
+**(E) Akibat untuk roadmap.**
+
+| Keputusan | Dasar terukur |
+| :--- | :--- |
+| **T2 (embedding int8, 196,6 → 49,2 MB) layak** | lm head 53,6 % lalu lintas/token dan berjalan di plafon DRAM. Proyeksi: 7,25 ms → ~1,8 ms; token 33,15 → ~27,7 ms (+16 %). Batas atas — belum menghitung galat kuantisasi dan kerja dequant. |
+| **radix3 (packing 1,6 bit) tidak layak untuk bagian ternary** | Bagian ternary compute-bound; memangkas 34 MB/token tidak mengurangi waktu, dan unpacking 3-nilai-per-5-bit menambah ALU. |
+| **Pengungkit terbesar = kernel ternary itu sendiri (17,65 ms, 53,2 %)** | Menghapus memori sepenuhnya hanya menghemat ~25 %. Dua kandidat: (1) hoist + SIMD kuantisasi X (~2 ms/token, sudah terukur), (2) layout bobot pra-shuffle saat konversi agar loop dalam tidak lagi memakai shift/and per field. |
+
+`int8_gemv` yang ada saat ini hanya `int8_gemv_baseline` (skalar) — T2 memerlukan kernel AVX2 baru, bukan sekadar mengganti dtype di container.
